@@ -21,7 +21,8 @@ my $num_of_tests_planned;
 my int $no_plan;
 my num $time_before;
 my num $time_after;
-my int $subtest_level = 0;
+my int $subtest_level;
+my int $is_in_todoed_subtest;
 
 # Output should always go to real stdout/stderr, not to any dynamic overrides.
 my $output;
@@ -390,15 +391,21 @@ sub skip-rest($reason = '<unknown>') is export {
 multi sub subtest(Pair $what)            is export { subtest($what.value,$what.key) }
 multi sub subtest($desc, &subtests)      is export { subtest(&subtests,$desc)       }
 multi sub subtest(&subtests, $desc = '') is export {
+    my $parent's-todo-reason = $todo_reason;
     _push_vars();
     _init_vars();
     $subtest_callable_type = &subtests.WHAT;
     $indents ~= "    ";
     ## TODO: remove workaround for rakudo-j RT #128123 when postfix:<++> does not die here
     $subtest_level += 1;
+    if $parent's-todo-reason {
+        $is_in_todoed_subtest += 1;
+        $todo_reason = $parent's-todo-reason;
+    }
     subtests();
     ## TODO: remove workaround for rakudo-j RT #128123 when postfix:<--> does not die here
     $subtest_level -= 1;
+    $is_in_todoed_subtest -= 1 if $parent's-todo-reason;
     done-testing() if nqp::iseq_i($done_testing_has_been_run,0);
     my $status =
       $num_of_tests_failed == 0 && $num_of_tests_planned == $num_of_tests_run;
@@ -416,7 +423,8 @@ sub diag(Mu $message) is export {
 
 sub _diag(Mu $message, :$force-stderr) {
     _init_io() unless $output;
-    my $is_todo = !$force-stderr && $num_of_tests_run <= $todo_upto_test_num;
+    my $is_todo = !$force-stderr
+        && ($is_in_todoed_subtest || $num_of_tests_run <= $todo_upto_test_num);
     my $out     = $is_todo ?? $todo_output !! $failure_output;
 
     $time_after = nqp::time_n;
@@ -643,14 +651,14 @@ sub _is_deeply(Mu $got, Mu $expected) {
 ## 'private' subs
 
 sub die-on-fail {
-    if !$todo_reason && !$subtest_level && nqp::iseq_i($die_on_fail,1) {
+    if !$todo_reason && ! $is_in_todoed_subtest && nqp::iseq_i($die_on_fail,1) {
         _diag 'Test failed. Stopping test suite, because'
                 ~ ' PERL6_TEST_DIE_ON_FAIL environmental variable is set'
                 ~ ' to a true value.';
         exit 255;
     }
 
-    $todo_reason = '' if $todo_upto_test_num == $num_of_tests_run;
+    $todo_reason = '' if $todo_upto_test_num == $num_of_tests_run && ! $is_in_todoed_subtest;
 
     False;
 }
@@ -672,7 +680,8 @@ sub proclaim(Bool(Mu) $cond, $desc is copy ) {
     unless $cond {
         $tap ~= "not ";
         $num_of_tests_failed = $num_of_tests_failed + 1
-          unless  $num_of_tests_run <= $todo_upto_test_num;
+            unless $is_in_todoed_subtest
+            || $num_of_tests_run <= $todo_upto_test_num;
     }
 
     # TAP parsers do not like '#' in the description, they'd miss the '# TODO'
@@ -685,7 +694,8 @@ sub proclaim(Bool(Mu) $cond, $desc is copy ) {
         )
     !! '';
 
-    $tap ~= $todo_reason && $num_of_tests_run <= $todo_upto_test_num
+    $tap ~= $todo_reason
+        && ($is_in_todoed_subtest || $num_of_tests_run <= $todo_upto_test_num)
         ?? "ok $num_of_tests_run - $desc$todo_reason"
         !! "ok $num_of_tests_run - $desc";
 
